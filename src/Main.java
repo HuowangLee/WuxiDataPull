@@ -15,7 +15,7 @@ public class Main {
 
     // ======= Configurable parameters =======
     static final String START_STR = "2025-07-01 00:00:00";
-    static final String END_STR   = "2025-07-02 00:00:00";
+    static final String END_STR   = "2025-07-01 01:00:00";
     static final String TAGS_FILE = "tags.txt";
     static final String OUT_CSV   = "data_origin.csv";
     static final String TS_PATTERN = "yyyy-MM-dd HH:mm:ss";
@@ -42,11 +42,13 @@ public class Main {
             return;
         }
 
-        List<Date[]> hourlyWindows = splitByHour(start, end);
+        int STEP_MINUTES = 15;
+        List<Date[]> windows = splitByMinutes(start, end, STEP_MINUTES);
+
 
         TreeMap<Long, double[]> timeToRow = new TreeMap<>();
 
-        for (Date[] win : hourlyWindows) {
+        for (Date[] win : windows) {
             Date winStart = win[0];
             Date winEnd   = win[1];
             System.out.println(String.format("处理时间窗: %s ~ %s",
@@ -132,26 +134,32 @@ public class Main {
     }
 
 
-    private static List<Date[]> splitByHour(Date start, Date end) {
+    /** 将 [start, end] 按 stepMinutes 分钟切分为若干 [winStart, winEnd]（右开到 end） */
+    private static List<Date[]> splitByMinutes(Date start, Date end, int stepMinutes) {
+        if (stepMinutes <= 0) {
+            throw new IllegalArgumentException("stepMinutes 必须为正整数");
+        }
         List<Date[]> windows = new ArrayList<>();
         Calendar cal = Calendar.getInstance();
         cal.setTime(start);
 
-        while (true) {
+        // 和原逻辑一致：最后一段到 end 为止
+        while (cal.getTime().before(end)) {
             Date winStart = cal.getTime();
 
             Calendar next = (Calendar) cal.clone();
-            next.add(Calendar.HOUR_OF_DAY, 1);
+            next.add(Calendar.MINUTE, stepMinutes);
             Date candidateEnd = next.getTime();
 
             Date winEnd = candidateEnd.before(end) ? candidateEnd : end;
             windows.add(new Date[]{winStart, winEnd});
 
-            if (!candidateEnd.before(end)) break;
+            if (!candidateEnd.before(end)) break; // 已到或超过 end
             cal = next;
         }
         return windows;
     }
+
 
     private static void writeCsv(Path outPath, SimpleDateFormat fmt, List<NameTag> pairs, TreeMap<Long, double[]> timeToRow)
             throws IOException {
