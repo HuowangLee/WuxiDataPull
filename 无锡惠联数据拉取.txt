@@ -1,0 +1,94 @@
+ /**
+     * 卡点到2023-01-01 00:00:00 - 2025-01-01 00:00:00,
+     * 时间段必须是整点 2023-01-01 00:00:00 - 2023-01-01 00:05:00
+     *
+     * @param templateInfo 点位信息
+     * @param startTime    开始时间
+     * @param endTime      结束时间
+     * @param minute       间隔分钟
+     */
+    @Async
+    @Override
+    public void pullData(TemplateDataDO templateInfo, String startTime, String endTime, Integer minute) {
+        //修改状态为拉取中
+        this.update(Wrappers.lambdaUpdate(TemplateDataDO.class)
+                .eq(TemplateDataDO::getTemplateDataId, templateInfo.getTemplateDataId())
+                .set(TemplateDataDO::getStatus, TemplateDataStatusEnum.CLZ.getStatus()));
+
+        String prefix = templateInfo.getPrefix();
+        String code = templateInfo.getCode();
+        String tableName = prefix.replace(".", "_") + code;
+        String tag = prefix + code;
+        int split = (24 * 60) / minute;
+
+        Date startDate = DateUtils.convertStr2Date(startTime, DateUtils.DATE_TIME_PATTERN);
+        Date endDate = DateUtils.convertStr2Date(endTime, DateUtils.DATE_TIME_PATTERN);
+        //获取日期差的天数
+        int days = (int) DateUtil.between(startDate, endDate, DateUnit.DAY);
+        try {
+            for (int i = 0; i < days; i++) {
+                //每天请求一次接口
+                Date startOffsetDay = DateUtil.offsetDay(startDate, i);
+                Date endOffsetDay = DateUtil.offsetDay(startDate, i + 1);
+                //根据测点标签名称等条件获取历史浮点形数据
+
+                List<DoubleData> doubleArchivedValuesByTag = GoldenRTDBDao.getDoubleArchivedValuesByTag(tag, startOffsetDay, endOffsetDay);
+                if (CollUtil.isEmpty(doubleArchivedValuesByTag)) {
+                    //修改状态为处理完成
+                    if (i == (days - 1)) {
+                        this.update(Wrappers.lambdaUpdate(TemplateDataDO.class)
+                                .eq(TemplateDataDO::getTemplateDataId, templateInfo.getTemplateDataId())
+                                .set(TemplateDataDO::getStatus, TemplateDataStatusEnum.CLWC.getStatus()));
+                    }
+                    continue;
+                }
+                //时间数据进行转换一次
+                List<DoubleDataBO> resList = doubleArchivedValuesByTag.stream().map(t -> {
+                    DoubleDataBO doubleDataBO = new DoubleDataBO();
+                    BeanUtil.copyProperties(t, doubleDataBO);
+                    doubleDataBO.setTimeStamp((int) (t.getDateTime().getTime() / 1000));
+                    return doubleDataBO;
+                }).collect(Collectors.toList());
+
+                //每天入库的数据
+                List<GoldenDO> saveList = new ArrayList<>();
+                int id = doubleArchivedValuesByTag.get(0).getId();
+
+                //偏移30分钟时间组合
+                List<DoubleDataTimeBO> timeList = new ArrayList<>();
+                for (int j = 0; j < split; j++) {
+                    offsetMinuteList(startOffsetDay, j, minute, timeList);
+                }
+
+                for (DoubleDataTimeBO timeBO : timeList) {
+                    int startTimeStamp = timeBO.getStartTimeStamp();
+                    int endTimeStamp = timeBO.getEndTimeStamp();
+                    double average = resList.stream()
+                            .filter(t -> t.getTimeStamp() >= startTimeStamp && t.getTimeStamp() <= endTimeStamp)
+                            .mapToDouble(DoubleDataBO::getValue)
+                            .average().orElse(0);
+                    GoldenDO goldenDO = new GoldenDO();
+                    goldenDO.setValue(String.valueOf(average));
+                    goldenDO.setCode_id(id);
+                    goldenDO.setStartTime(timeBO.getStartTimeDate());
+                    goldenDO.setEndTime(timeBO.getEndTimeDate());
+                    goldenDO.setEndTimeInt(timeBO.getEndTimeStamp());
+                    goldenDO.setStartTimeInt(timeBO.getStartTimeStamp());
+                    saveList.add(goldenDO);
+                }
+                TableNameHelper.setTableName(tableName);
+                goldenService.saveBatch(saveList);
+                //修改状态为处理完成
+                if (i == (days - 1)) {
+                    this.update(Wrappers.lambdaUpdate(TemplateDataDO.class)
+                            .eq(TemplateDataDO::getTemplateDataId, templateInfo.getTemplateDataId())
+                            .set(TemplateDataDO::getStatus, TemplateDataStatusEnum.CLWC.getStatus()));
+                }
+            }
+        } catch (Exception e) {
+            log.error("错误信息-tag:{},startTime:{},endTime:{}", tag, startTime, endTime);
+            this.update(Wrappers.lambdaUpdate(TemplateDataDO.class)
+                    .eq(TemplateDataDO::getTemplateDataId, templateInfo.getTemplateDataId())
+                    .set(TemplateDataDO::getStatus, TemplateDataStatusEnum.CL_FAIL.getStatus()));
+        }
+    }
