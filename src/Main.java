@@ -51,9 +51,17 @@ public class Main {
         for (Date[] win : windows) {
             Date winStart = win[0];
             Date winEnd   = win[1];
+
+            long startMs = toSecMs(winStart.getTime());
+            long endMs   = toSecMs(winEnd.getTime());
+
             System.out.println(String.format("处理时间窗: %s ~ %s",
                     fmt.format(winStart), fmt.format(winEnd)));
 
+            // 1) 先把这个窗口内“每一秒”的行都预建好（NaN）
+            ensurePerSecondRows(winStart, winEnd, n, timeToRow);
+
+            // 2) 再逐列抓取并写值
             for (int col = 0; col < n; col++) {
                 NameTag nt = pairs.get(col);
                 String tag = nt.tag;
@@ -61,8 +69,8 @@ public class Main {
 
                 System.out.printf("  [%d/%d] 正在处理 tag: %s (%s)...%n", col + 1, n, name, tag);
 
-                List<DoubleData> list = fetchWithRetry(tag, winStart, winEnd,
-                        MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
+                List<DoubleData> list = fetchWithRetry(
+                        tag, winStart, winEnd, MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
 
                 if (list == null || list.isEmpty()) {
                     System.out.printf("    -> tag %s 无数据%n", tag);
@@ -74,19 +82,25 @@ public class Main {
                 for (DoubleData d : list) {
                     Date dt = d.getDateTime();
                     if (dt == null) continue;
-                    long ts = dt.getTime();
 
-                    double[] row = timeToRow.computeIfAbsent(ts, k -> {
-                        double[] arr = new double[n];
-                        Arrays.fill(arr, Double.NaN);
-                        return arr;
-                    });
+                    // 归一到“秒”的时间戳，确保与预建行对齐
+                    long ts = toSecMs(dt.getTime());
+
+                    // 可选：丢弃落在窗口外的数据点（有些数据源会回多/回少）
+                    if (ts < startMs || ts > endMs) continue;
+
+                    double[] row = timeToRow.get(ts); // 一定存在，因为已预建
+                    if (row == null) {
+                        // 理论上不会发生；稳妥起见保底建一下
+                        row = new double[n];
+                        Arrays.fill(row, Double.NaN);
+                        timeToRow.put(ts, row);
+                    }
 
                     Double val = d.getValue();
                     row[col] = (val == null ? Double.NaN : val.doubleValue());
                 }
             }
-
         }
 
         writeCsv(Paths.get(OUT_CSV), fmt, pairs, timeToRow);
@@ -100,6 +114,25 @@ public class Main {
         NameTag(String name, String tag) {
             this.name = name;
             this.tag  = tag;
+        }
+    }
+
+    // 工具方法：把毫秒时间戳归一到整秒（毫秒清零）
+    private static long toSecMs(long t) {
+        return (t / 1000) * 1000;
+    }
+
+    // 工具方法：为 [start,end] 窗口内的每一秒预建一行（NaN）
+    private static void ensurePerSecondRows(
+            Date winStart, Date winEnd, int n, Map<Long, double[]> timeToRow) {
+        long startMs = toSecMs(winStart.getTime());
+        long endMs   = toSecMs(winEnd.getTime());
+        for (long ts = startMs; ts <= endMs; ts += 1000) { // 包含末尾；如需半开区间改成 ts < endMs
+            timeToRow.computeIfAbsent(ts, k -> {
+                double[] arr = new double[n];
+                Arrays.fill(arr, Double.NaN);
+                return arr;
+            });
         }
     }
 
