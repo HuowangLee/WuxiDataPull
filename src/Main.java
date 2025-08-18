@@ -15,7 +15,7 @@ public class Main {
 
     // ======= Configurable parameters =======
     static final String START_STR = "2025-07-01 00:00:00";
-    static final String END_STR   = "2025-07-01 01:00:00";
+    static final String END_STR   = "2025-07-01 00:30:00";
     static final String TAGS_FILE = "tags.txt";
     static final String OUT_CSV   = "data_origin.csv";
     static final String TS_PATTERN = "yyyy-MM-dd HH:mm:ss";
