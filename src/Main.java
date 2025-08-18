@@ -15,7 +15,7 @@ public class Main {
 
     // ======= Configurable parameters =======
     static final String START_STR = "2025-07-01 00:00:00";
-    static final String END_STR   = "2025-08-01 09:00:00";
+    static final String END_STR   = "2025-07-02 00:00:00";
     static final String TAGS_FILE = "tags.txt";
     static final String OUT_CSV   = "data_origin.csv";
     static final String TS_PATTERN = "yyyy-MM-dd HH:mm:ss";
@@ -56,35 +56,35 @@ public class Main {
                 NameTag nt = pairs.get(col);
                 String tag = nt.tag;
                 String name = nt.name;
-            
+
                 System.out.printf("  [%d/%d] 正在处理 tag: %s (%s)...%n", col + 1, n, name, tag);
-            
+
                 List<DoubleData> list = fetchWithRetry(tag, winStart, winEnd,
                         MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
-            
+
                 if (list == null || list.isEmpty()) {
                     System.out.printf("    -> tag %s 无数据%n", tag);
                     continue;
                 }
-            
+
                 System.out.printf("    -> tag %s 返回数据点数: %d%n", tag, list.size());
-            
+
                 for (DoubleData d : list) {
                     Date dt = d.getDateTime();
                     if (dt == null) continue;
                     long ts = dt.getTime();
-            
+
                     double[] row = timeToRow.computeIfAbsent(ts, k -> {
                         double[] arr = new double[n];
                         Arrays.fill(arr, Double.NaN);
                         return arr;
                     });
-            
+
                     Double val = d.getValue();
                     row[col] = (val == null ? Double.NaN : val.doubleValue());
                 }
             }
-                    
+
         }
 
         writeCsv(Paths.get(OUT_CSV), fmt, pairs, timeToRow);
@@ -100,17 +100,17 @@ public class Main {
             this.tag  = tag;
         }
     }
-    
+
     private static List<NameTag> readNameTags(Path path) throws IOException {
         if (!Files.exists(path)) return Collections.emptyList();
-    
+
         // 用 LinkedHashMap 去重并保持输入顺序：key=tag, value=name
         Map<String, String> tagToName = new LinkedHashMap<>();
-    
+
         for (String raw : Files.readAllLines(path, StandardCharsets.UTF_8)) {
             String line = raw.trim();
             if (line.isEmpty() || line.startsWith("#")) continue;
-    
+
             int comma = line.indexOf(',');
             if (comma <= 0 || comma == line.length() - 1) {
                 // 没有逗号，或逗号在开头/结尾 -> 跳过非法行
@@ -119,18 +119,18 @@ public class Main {
             String name = line.substring(0, comma).trim();
             String tag  = line.substring(comma + 1).trim();
             if (name.isEmpty() || tag.isEmpty()) continue;
-    
+
             // 去重：同一个 tag 只保留第一次出现
             tagToName.putIfAbsent(tag, name);
         }
-    
+
         List<NameTag> list = new ArrayList<>();
         for (Map.Entry<String, String> e : tagToName.entrySet()) {
             list.add(new NameTag(e.getValue(), e.getKey()));
         }
         return list;
     }
-    
+
 
     private static List<Date[]> splitByHour(Date start, Date end) {
         List<Date[]> windows = new ArrayList<>();
