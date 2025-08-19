@@ -14,10 +14,10 @@ import com.rtdb.model.DoubleData;
 public class Main {
 
     // ======= Configurable parameters =======
-    static final String START_STR = "2025-07-01 00:00:00";
-    static final String END_STR   = "2025-07-01 00:30:00";
-    static final String TAGS_FILE = "tags.txt";
-    static final String OUT_CSV   = "data_origin.csv";
+//     static final String START_STR = "2025-07-01 00:00:00";
+//     static final String END_STR   = "2025-07-01 01:00:00";
+//     static final String TAGS_FILE = "tags1.txt";
+//     static final String OUT_CSV   = "data_origin1.csv";
     static final String TS_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
     // Retry settings
@@ -25,6 +25,30 @@ public class Main {
     static final long INITIAL_BACKOFF_MS = 300; // 300ms, then 600ms, then 1200ms...
 
     public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.out.println("用法: java Main <开始时间> <截止时间> <tags文件名> [输出文件前缀]");
+            System.out.println("示例: java Main \"2025-07-01 00:00:00\" \"2025-07-01 01:00:00\" tags1.txt data_origin");
+            return;
+        }
+
+        // ====== 从命令行获取参数 ======
+        String START_STR = args[0];  // "2025-07-01 00:00:00"
+        String END_STR   = args[1];  // "2025-07-01 01:00:00"
+        String TAGS_FILE = args[2];  // "tags1.txt"
+        String outPrefix = args.length >= 4 ? args[3] : "data_origin";
+
+        // ====== 构造输出文件名 ======
+        String safeStart = startStr.replace(" ", "_").replace(":", "-");
+        String safeEnd   = endStr.replace(" ", "_").replace(":", "-");
+        String outCsv = String.format("%s_%s__%s__%s.csv", outPrefix, safeStart, safeEnd, tagsFile);
+
+        // ====== 打印确认信息 ======
+        System.out.println("开始时间: " + startStr);
+        System.out.println("截止时间: " + endStr);
+        System.out.println("Tags文件: " + tagsFile);
+        System.out.println("输出文件: " + outCsv);
+
+
         List<NameTag> pairs = readNameTags(Paths.get(TAGS_FILE));
         if (pairs.isEmpty()) {
             System.err.println("输入文件为空或未找到有效的 显示名,tag。");
@@ -42,7 +66,7 @@ public class Main {
             return;
         }
 
-        int STEP_MINUTES = 15;
+        int STEP_MINUTES = 5;
         List<Date[]> windows = splitByMinutes(start, end, STEP_MINUTES);
 
 
