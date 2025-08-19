@@ -8,16 +8,13 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.stream.Collectors;
 
+
 import com.sn.parent.goldentools.component.GoldenRTDBDao;
 import com.rtdb.model.DoubleData;
 
 public class Main {
 
     // ======= Configurable parameters =======
-//     static final String START_STR = "2025-07-01 00:00:00";
-//     static final String END_STR   = "2025-07-01 01:00:00";
-//     static final String TAGS_FILE = "tags1.txt";
-//     static final String OUT_CSV   = "data_origin1.csv";
     static final String TS_PATTERN = "yyyy-MM-dd HH:mm:ss";
 
     // Retry settings
@@ -32,24 +29,35 @@ public class Main {
         }
 
         // ====== 从命令行获取参数 ======
-        String START_STR = args[0];  // "2025-07-01 00:00:00"
-        String END_STR   = args[1];  // "2025-07-01 01:00:00"
-        String TAGS_FILE = args[2];  // "tags1.txt"
-        String outPrefix = args.length >= 4 ? args[3] : "data_origin";
+        String startStr = args[0];  // "2025-07-01 00:00:00"
+        String endStr   = args[1];  // "2025-07-01 01:00:00"
+        String tagsFile = args[2];  // "tags1.txt"
+        // String outPrefix = args.length >= 4 ? args[3] : "data_origin";
 
         // ====== 构造输出文件名 ======
         String safeStart = startStr.replace(" ", "_").replace(":", "-");
         String safeEnd   = endStr.replace(" ", "_").replace(":", "-");
-        String outCsv = String.format("%s_%s__%s__%s.csv", outPrefix, safeStart, safeEnd, tagsFile);
+
+        String safeTagsFile = tagsFile;
+        int dotIndex = tagsFile.lastIndexOf('.');
+        if (dotIndex > 0) {
+            safeTagsFile = tagsFile.substring(0, dotIndex);
+        }
+        
+        String folderName = safeTagsFile + "_data_" + safeStart + "__" + safeEnd;
+        java.io.File folder = new java.io.File(folderName);
+        if (!folder.exists()) {
+            folder.mkdirs();
+        }
 
         // ====== 打印确认信息 ======
         System.out.println("开始时间: " + startStr);
         System.out.println("截止时间: " + endStr);
         System.out.println("Tags文件: " + tagsFile);
-        System.out.println("输出文件: " + outCsv);
+        System.out.println("输出文件夹: " + folderName);
 
 
-        List<NameTag> pairs = readNameTags(Paths.get(TAGS_FILE));
+        List<NameTag> pairs = readNameTags(Paths.get(tagsFile));
         if (pairs.isEmpty()) {
             System.err.println("输入文件为空或未找到有效的 显示名,tag。");
             return;
@@ -59,8 +67,8 @@ public class Main {
         System.out.println("将处理的 tag 数量: " + pairs.size());
 
         SimpleDateFormat fmt = new SimpleDateFormat(TS_PATTERN);
-        Date start = fmt.parse(START_STR);
-        Date end   = fmt.parse(END_STR);
+        Date start = fmt.parse(startStr);
+        Date end   = fmt.parse(endStr);
         if (!start.before(end)) {
             System.err.println("开始时间需要早于结束时间。");
             return;
@@ -71,8 +79,9 @@ public class Main {
 
 
         TreeMap<Long, double[]> timeToRow = new TreeMap<>();
-
-        for (Date[] win : windows) {
+        
+        for (int widx = 0; widx < windows.size(); widx++) {
+            Date[] win = windows.get(widx);
             Date winStart = win[0];
             Date winEnd   = win[1];
 
@@ -82,8 +91,11 @@ public class Main {
             System.out.println(String.format("处理时间窗: %s ~ %s",
                     fmt.format(winStart), fmt.format(winEnd)));
 
+            // ⭐ 关键区别：为“当前窗口”单独建一个 Map，避免全局累计
+            NavigableMap<Long, double[]> perWindow = new java.util.TreeMap<>();
+
             // 1) 先把这个窗口内“每一秒”的行都预建好（NaN）
-            ensurePerSecondRows(winStart, winEnd, n, timeToRow);
+            ensurePerSecondRows(winStart, winEnd, n, perWindow);
 
             // 2) 再逐列抓取并写值
             for (int col = 0; col < n; col++) {
@@ -113,22 +125,30 @@ public class Main {
                     // 可选：丢弃落在窗口外的数据点（有些数据源会回多/回少）
                     if (ts < startMs || ts > endMs) continue;
 
-                    double[] row = timeToRow.get(ts); // 一定存在，因为已预建
+                    double[] row = perWindow.get(ts); // 一定存在，因为已预建
                     if (row == null) {
                         // 理论上不会发生；稳妥起见保底建一下
                         row = new double[n];
                         Arrays.fill(row, Double.NaN);
-                        timeToRow.put(ts, row);
+                        perWindow.put(ts, row);
                     }
 
                     Double val = d.getValue();
                     row[col] = (val == null ? Double.NaN : val.doubleValue());
                 }
             }
+
+            // 当前窗口立刻落盘（GBK)
+            Path outPath = buildWindowCsvPath(folderName, winStart, winEnd, widx + 1);
+            writeCsvGbk(outPath, fmt, pairs, perWindow);
+            System.out.println("已写出 CSV: " + outPath);
+            System.out.println("本窗口总行数: " + perWindow.size());
         }
 
-        writeCsv(Paths.get(OUT_CSV), fmt, pairs, timeToRow);
-        System.out.println("已写出 CSV: " + OUT_CSV);
+        // 如果你仍想保留“汇总一份大 CSV”，可以在循环外继续使用原先的全局 timeToRow 再写一次。
+        String allData = folderName + "/data_origin.csv";
+        writeCsv(Paths.get(allData), fmt, pairs, timeToRow);
+        System.out.println("已写出 CSV: " + allData);
         System.out.println("总行数(含不同时间点): " + timeToRow.size());
     }
 
@@ -279,4 +299,47 @@ public class Main {
         }
     }
 
+    // 文件名拼接（outCsv 无后缀，这里统一补 .csv）
+    private static java.nio.file.Path buildWindowCsvPath(String base, java.util.Date start, java.util.Date end, int idx) {
+        java.text.SimpleDateFormat ts = new java.text.SimpleDateFormat("yyyyMMddHHmmss");
+        String name = String.format("%s/%06d_%s_%s.csv", base, idx, ts.format(start), ts.format(end));
+        return java.nio.file.Paths.get(name);
+    }
+
+    // 以 GBK 编码写 CSV（不用 OutputStreamWriter / StandardOpenOption）
+    private static void writeCsvGbk(java.nio.file.Path path,
+                                    java.text.DateFormat fmt,
+                                    java.util.List<NameTag> pairs,
+                                    java.util.NavigableMap<Long, double[]> timeToRow) throws java.io.IOException {
+
+        try (java.io.BufferedWriter w = java.nio.file.Files.newBufferedWriter(
+                path, java.nio.charset.Charset.forName("GBK"))) {
+
+            // header
+            StringBuilder header = new StringBuilder("time");
+            for (NameTag nt : pairs) {
+                header.append(',').append(nt.name);
+            }
+            w.write(header.toString());
+            w.newLine();
+
+            // rows（按时间升序）
+            for (java.util.Map.Entry<Long, double[]> e : timeToRow.entrySet()) {
+                long tsMs = e.getKey();
+                double[] row = e.getValue();
+
+                StringBuilder line = new StringBuilder();
+                line.append(fmt.format(new java.util.Date(tsMs)));
+                for (double v : row) {
+                    if (Double.isNaN(v)) {
+                        line.append(','); // 空值
+                    } else {
+                        line.append(',').append(v);
+                    }
+                }
+                w.write(line.toString());
+                w.newLine();
+            }
+        }
+    }
 }
