@@ -69,10 +69,10 @@ public class Main {
         SimpleDateFormat fmt = new SimpleDateFormat(TS_PATTERN);
         Date start = fmt.parse(startStr);
         Date end   = fmt.parse(endStr);
-        if (!start.before(end)) {
-            System.err.println("开始时间需要早于结束时间。");
-            return;
-        }
+        // if (!start.before(end)) {
+        //     System.err.println("开始时间需要早于结束时间。");
+        //     return;
+        // }
 
         int STEP_MINUTES = 5;
         List<Date[]> windows = splitByMinutes(start, end, STEP_MINUTES);
@@ -105,8 +105,11 @@ public class Main {
 
                 System.out.printf("  [%d/%d] 正在处理 tag: %s (%s)...%n", col + 1, n, name, tag);
 
-                List<DoubleData> list = fetchWithRetry(
-                        tag, winStart, winEnd, MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
+                // List<DoubleData> list = fetchWithRetry(
+                //         tag, winStart, winEnd, MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
+
+                List<DoubleData> list = fetchUntilSuccess(
+                        tag, winStart, winEnd, INITIAL_BACKOFF_MS, fmt);        
 
                 if (list == null || list.isEmpty()) {
                     System.out.printf("    -> tag %s 无数据%n", tag);
@@ -211,27 +214,43 @@ public class Main {
     }
 
 
-    /** 将 [start, end] 按 stepMinutes 分钟切分为若干 [winStart, winEnd]（右开到 end） */
+    /** 将 [start, end) 划分为若干 [winStart, winEnd]；当 start < end 时，最末段止于 end-1s（右开到 end） */
     private static List<Date[]> splitByMinutes(Date start, Date end, int stepMinutes) {
         if (stepMinutes <= 0) {
             throw new IllegalArgumentException("stepMinutes 必须为正整数");
         }
+        if (start.after(end)) {
+            throw new IllegalArgumentException("start 不能晚于 end");
+        }
+
+        // 明确支持：start == end 时，返回一个零长度窗口 [start, end]
+        if (start.equals(end)) {
+            return Collections.singletonList(new Date[]{start, end});
+        }
+
+        // 右开到 end：把硬性终点设为 end - 1s
+        Date hardEnd = new Date(end.getTime() - 1000L);
+
+        // 若 end - 1s 仍早于 start（区间不足 1s），则没有可分的闭区间段
+        if (hardEnd.before(start)) {
+            return Collections.emptyList();
+        }
+
         List<Date[]> windows = new ArrayList<>();
         Calendar cal = Calendar.getInstance();
         cal.setTime(start);
 
-        // 和原逻辑一致：最后一段到 end 为止
-        while (cal.getTime().before(end)) {
+        while (!cal.getTime().after(hardEnd)) { // 等价于 cal <= hardEnd
             Date winStart = cal.getTime();
 
             Calendar next = (Calendar) cal.clone();
             next.add(Calendar.MINUTE, stepMinutes);
             Date candidateEnd = next.getTime();
 
-            Date winEnd = candidateEnd.before(end) ? candidateEnd : end;
+            Date winEnd = candidateEnd.before(hardEnd) ? candidateEnd : hardEnd;
             windows.add(new Date[]{winStart, winEnd});
 
-            if (!candidateEnd.before(end)) break; // 已到或超过 end
+            if (!candidateEnd.before(hardEnd)) break; // 已到或超过 hardEnd (即 end-1s)
             cal = next;
         }
         return windows;
@@ -298,6 +317,41 @@ public class Main {
             backoff *= 2; // 指数退避
         }
     }
+
+    /** 只要结果为空就重试（无上限），指数退避 */
+    private static List<DoubleData> fetchUntilSuccess(
+            String tag, Date winStart, Date winEnd,
+            long initialBackoffMs, SimpleDateFormat fmt) {
+
+        long backoff = Math.max(1L, initialBackoffMs); // 保底 1ms
+        int attempt = 0;
+
+        while (true) {
+            attempt++;
+            try {
+                List<DoubleData> res = GoldenRTDBDao.getDoubleArchivedValuesByTag(tag, winStart, winEnd);
+
+                if (res != null && !res.isEmpty()) {
+                    return res; // 成功：非空
+                }
+
+                System.err.printf("返回空结果: tag=%s 窗口=%s~%s 尝试=%d，将在 %dms 后重试%n",
+                        tag, fmt.format(winStart), fmt.format(winEnd), attempt, backoff);
+
+            } catch (Throwable t) { // 第三方若偶尔抛错，也一并重试
+                System.err.printf("调用异常(忽略并重试): tag=%s 窗口=%s~%s 尝试=%d，将在 %dms 后重试；原因=%s%n",
+                        tag, fmt.format(winStart), fmt.format(winEnd), attempt, backoff, t);
+            }
+
+            try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
+
+            // 指数退避（无上限）；如需上限可改成 Math.min(backoff << 1, 60_000L)
+            backoff = backoff << 1;
+            if (backoff <= 0) backoff = Long.MAX_VALUE / 2; // 防溢出
+        }
+    }
+
+
 
     // 文件名拼接（outCsv 无后缀，这里统一补 .csv）
     private static java.nio.file.Path buildWindowCsvPath(String base, java.util.Date start, java.util.Date end, int idx) {
