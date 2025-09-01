@@ -287,37 +287,6 @@ public class Main {
         }
     }
 
-    /**
-     * Fetch with retry for transient socket/protocol errors from GoldenRTDB.
-     */
-    private static List<DoubleData> fetchWithRetry(String tag, Date winStart, Date winEnd,
-                                               int maxRetries, long initialBackoffMs,
-                                               SimpleDateFormat fmt) {
-        long backoff = initialBackoffMs;
-        int attempt = 0;
-        while (true) {
-            attempt++;
-            try {
-                return GoldenRTDBDao.getDoubleArchivedValuesByTag(tag, winStart, winEnd);
-            } catch (IndexOutOfBoundsException e) {
-                System.err.printf("读取失败(可能断连/协议问题): tag=%s 窗口=%s~%s 尝试=%d/%d, 错误=%s%n",
-                        tag, fmt.format(winStart), fmt.format(winEnd), attempt, maxRetries, e.toString());
-            } catch (RuntimeException e) { // 兜底：第三方库常把 I/O 异常包装成 RuntimeException 抛出
-                System.err.printf("运行时异常: tag=%s 窗口=%s~%s 尝试=%d/%d, 错误=%s%n",
-                        tag, fmt.format(winStart), fmt.format(winEnd), attempt, maxRetries, e.toString());
-            }
-
-            if (attempt >= maxRetries) {
-                System.err.printf("放弃本窗口: tag=%s 窗口=%s~%s（已重试 %d 次）%n",
-                        tag, fmt.format(winStart), fmt.format(winEnd), maxRetries);
-                return Collections.emptyList();
-            }
-
-            try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
-            backoff *= 2; // 指数退避
-        }
-    }
-
     /** 只要结果为空就重试（无上限），指数退避 */
     private static List<DoubleData> fetchUntilSuccess(
             String tag, Date winStart, Date winEnd,
@@ -330,23 +299,38 @@ public class Main {
             attempt++;
             try {
                 List<DoubleData> res = GoldenRTDBDao.getDoubleArchivedValuesByTag(tag, winStart, winEnd);
-
-                if (res != null && !res.isEmpty()) {
-                    return res; // 成功：非空
-                }
-
+                if (res != null && !res.isEmpty()) return res;
                 System.err.printf("返回空结果: tag=%s 窗口=%s~%s 尝试=%d，将在 %dms 后重试%n",
                         tag, fmt.format(winStart), fmt.format(winEnd), attempt, backoff);
-
-            } catch (Throwable t) { // 第三方若偶尔抛错，也一并重试
+            
+            } catch (ExceptionInInitializerError e) {
+                System.err.println("GoldenRTDBDao 静态初始化失败（不会重试）");
+                if (e.getCause() != null) e.getCause().printStackTrace(); else e.printStackTrace();
+                // 结束重试：要么抛出，要么返回空并让上游处理
+                throw e; // 或者 return Collections.emptyList();
+            
+            } catch (NoClassDefFoundError e) {
+                if (String.valueOf(e.getMessage())
+                        .contains("Could not initialize class com.sn.parent.goldentools.component.GoldenRTDBDao")) {
+                    System.err.println("GoldenRTDBDao 已因初始化失败被标记不可用（不会重试）");
+                    e.printStackTrace();
+                    throw e; // 或 return Collections.emptyList();
+                }
+                throw e;
+            
+            } catch (Throwable t) {
+                // 仅对“可恢复”的异常重试
+                t.printStackTrace();
                 System.err.printf("调用异常(忽略并重试): tag=%s 窗口=%s~%s 尝试=%d，将在 %dms 后重试；原因=%s%n",
                         tag, fmt.format(winStart), fmt.format(winEnd), attempt, backoff, t);
             }
+            
 
             try { Thread.sleep(backoff); } catch (InterruptedException ignored) {}
 
             // 指数退避（无上限）；如需上限可改成 Math.min(backoff << 1, 60_000L)
-            backoff = backoff << 1;
+            // backoff = backoff << 1;
+            backoff = Math.min(backoff << 1, 60_000L);
             if (backoff <= 0) backoff = Long.MAX_VALUE / 2; // 防溢出
         }
     }
