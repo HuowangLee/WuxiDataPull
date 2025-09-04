@@ -44,7 +44,7 @@ public class Main {
             safeTagsFile = tagsFile.substring(0, dotIndex);
         }
         
-        String folderName = safeTagsFile + "_data_" + safeStart + "__" + safeEnd;
+        String folderName = "variables_out_1";
         java.io.File folder = new java.io.File(folderName);
         if (!folder.exists()) {
             folder.mkdirs();
@@ -74,85 +74,89 @@ public class Main {
         //     return;
         // }
 
-        int STEP_MINUTES = 5;
+        int STEP_MINUTES = 60;
         List<Date[]> windows = splitByMinutes(start, end, STEP_MINUTES);
 
 
         TreeMap<Long, double[]> timeToRow = new TreeMap<>();
+
+        // 确定输出根目录
+        Path baseOutputRoot = Paths.get(folderName);
+        Files.createDirectories(baseOutputRoot); // 确保存在
         
         for (int widx = 0; widx < windows.size(); widx++) {
             Date[] win = windows.get(widx);
             Date winStart = win[0];
             Date winEnd   = win[1];
-
+        
             long startMs = toSecMs(winStart.getTime());
             long endMs   = toSecMs(winEnd.getTime());
-
+        
             System.out.println(String.format("处理时间窗: %s ~ %s",
                     fmt.format(winStart), fmt.format(winEnd)));
+        
+            // === 关键变化点：改为“每列一个 Map”，不再全局二维累计 ===
+            List<NavigableMap<Long, Double>> perColMaps = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                NavigableMap<Long, Double> perCol = new java.util.TreeMap<>();
+                ensurePerSecondRowsSingleCol(winStart, winEnd, perCol); // 预建 NaN 行
+                perColMaps.add(perCol);
+            }
 
-            // ⭐ 关键区别：为“当前窗口”单独建一个 Map，避免全局累计
-            NavigableMap<Long, double[]> perWindow = new java.util.TreeMap<>();
 
-            // 1) 先把这个窗口内“每一秒”的行都预建好（NaN）
-            ensurePerSecondRows(winStart, winEnd, n, perWindow);
-
-            // 2) 再逐列抓取并写值
+        
+            // 逐列抓取并写入各自 map
             for (int col = 0; col < n; col++) {
                 NameTag nt = pairs.get(col);
-                String tag = nt.tag;
-                String name = nt.name;
-
+                String tag = nt.tag;   // 抓取用
+                String name = nt.name; // 落盘目录名
+        
                 System.out.printf("  [%d/%d] 正在处理 tag: %s (%s)...%n", col + 1, n, name, tag);
-
-                // List<DoubleData> list = fetchWithRetry(
-                //         tag, winStart, winEnd, MAX_RETRIES, INITIAL_BACKOFF_MS, fmt);
-
+        
                 List<DoubleData> list = fetchUntilSuccess(
-                        tag, winStart, winEnd, INITIAL_BACKOFF_MS, fmt);        
-
+                        tag, winStart, winEnd, INITIAL_BACKOFF_MS, fmt);
+        
                 if (list == null || list.isEmpty()) {
                     System.out.printf("    -> tag %s 无数据%n", tag);
                     continue;
                 }
-
+        
                 System.out.printf("    -> tag %s 返回数据点数: %d%n", tag, list.size());
-
+        
+                NavigableMap<Long, Double> perCol = perColMaps.get(col);
+        
                 for (DoubleData d : list) {
                     Date dt = d.getDateTime();
                     if (dt == null) continue;
-
-                    // 归一到“秒”的时间戳，确保与预建行对齐
+        
                     long ts = toSecMs(dt.getTime());
-
-                    // 可选：丢弃落在窗口外的数据点（有些数据源会回多/回少）
-                    if (ts < startMs || ts > endMs) continue;
-
-                    double[] row = perWindow.get(ts); // 一定存在，因为已预建
-                    if (row == null) {
-                        // 理论上不会发生；稳妥起见保底建一下
-                        row = new double[n];
-                        Arrays.fill(row, Double.NaN);
-                        perWindow.put(ts, row);
-                    }
-
+                    if (ts < startMs || ts > endMs) continue; // 丢弃窗口外
+        
                     Double val = d.getValue();
-                    row[col] = (val == null ? Double.NaN : val.doubleValue());
+                    perCol.put(ts, (val == null ? Double.NaN : val.doubleValue()));
                 }
+
             }
-
-            // 当前窗口立刻落盘（GBK)
-            Path outPath = buildWindowCsvPath(folderName, winStart, winEnd, widx + 1);
-            writeCsvGbk(outPath, fmt, pairs, perWindow);
-            System.out.println("已写出 CSV: " + outPath);
-            System.out.println("本窗口总行数: " + perWindow.size());
+        
+            // === 写盘：按列名分目录，每列一个 CSV ===
+            // 用你原来的函数生成“原始路径”，从中拿到“文件名”（保持不变）
+            
+        
+            for (int col = 0; col < n; col++) {
+                String colName = pairs.get(col).name; // 目录名 = 列名
+                Path original = buildWindowCsvPath(folderName, colName, winStart, winEnd);
+                String fileName = extractFileName(original);
+                Path colDir = baseOutputRoot.resolve(sanitizeAsFolder(colName)); // 你的输出根目录
+                ensureDir(colDir);
+        
+                Path outPath = colDir.resolve(fileName);
+                writeSingleColCsvGbk(outPath, fmt, colName, perColMaps.get(col));
+        
+                System.out.println("已写出列CSV: " + outPath);
+                System.out.println("本列本窗口总行数: " + perColMaps.get(col).size());
+            }
         }
-
-        // 如果你仍想保留“汇总一份大 CSV”，可以在循环外继续使用原先的全局 timeToRow 再写一次。
-        String allData = folderName + "/data_origin.csv";
-        writeCsv(Paths.get(allData), fmt, pairs, timeToRow);
-        System.out.println("已写出 CSV: " + allData);
-        System.out.println("总行数(含不同时间点): " + timeToRow.size());
+        
     }
 
     static class NameTag {
@@ -167,20 +171,6 @@ public class Main {
     // 工具方法：把毫秒时间戳归一到整秒（毫秒清零）
     private static long toSecMs(long t) {
         return (t / 1000) * 1000;
-    }
-
-    // 工具方法：为 [start,end] 窗口内的每一秒预建一行（NaN）
-    private static void ensurePerSecondRows(
-            Date winStart, Date winEnd, int n, Map<Long, double[]> timeToRow) {
-        long startMs = toSecMs(winStart.getTime());
-        long endMs   = toSecMs(winEnd.getTime());
-        for (long ts = startMs; ts <= endMs; ts += 1000) { // 包含末尾；如需半开区间改成 ts < endMs
-            timeToRow.computeIfAbsent(ts, k -> {
-                double[] arr = new double[n];
-                Arrays.fill(arr, Double.NaN);
-                return arr;
-            });
-        }
     }
 
     private static List<NameTag> readNameTags(Path path) throws IOException {
@@ -256,37 +246,6 @@ public class Main {
         return windows;
     }
 
-
-    private static void writeCsv(Path outPath, SimpleDateFormat fmt, List<NameTag> pairs, TreeMap<Long, double[]> timeToRow)
-            throws IOException {
-
-        try (BufferedWriter w = Files.newBufferedWriter(outPath, StandardCharsets.UTF_8)) {
-            // header
-            String header = "time," + pairs.stream().map(p -> p.name).collect(Collectors.joining(","));
-
-            w.write(header);
-            w.newLine();
-
-            final int n = pairs.size();
-            for (Map.Entry<Long, double[]> e : timeToRow.entrySet()) {
-                StringBuilder sb = new StringBuilder();
-                sb.append(fmt.format(new Date(e.getKey())));
-
-                double[] row = e.getValue();
-                for (int i = 0; i < n; i++) {
-                    sb.append(',');
-                    double v = row[i];
-                    if (!Double.isNaN(v)) {
-                        sb.append(v);
-                    }
-                }
-
-                w.write(sb.toString());
-                w.newLine();
-            }
-        }
-    }
-
     /** 只要结果为空就重试（无上限），指数退避 */
     private static List<DoubleData> fetchUntilSuccess(
             String tag, Date winStart, Date winEnd,
@@ -338,46 +297,66 @@ public class Main {
 
 
     // 文件名拼接（outCsv 无后缀，这里统一补 .csv）
-    private static java.nio.file.Path buildWindowCsvPath(String base, java.util.Date start, java.util.Date end, int idx) {
-        java.text.SimpleDateFormat ts = new java.text.SimpleDateFormat("yyyyMMddHHmmss");
-        String name = String.format("%s/%06d_%s_%s.csv", base, idx, ts.format(start), ts.format(end));
+    private static java.nio.file.Path buildWindowCsvPath(String base, String tagName, java.util.Date start, java.util.Date end) {
+        java.text.SimpleDateFormat ts = new java.text.SimpleDateFormat("yyyyMMdd'T'HHmmss");
+        String name = String.format("%s/%s_%s-%s.csv", base, tagName, ts.format(start), ts.format(end));
         return java.nio.file.Paths.get(name);
     }
 
-    // 以 GBK 编码写 CSV（不用 OutputStreamWriter / StandardOpenOption）
-    private static void writeCsvGbk(java.nio.file.Path path,
-                                    java.text.DateFormat fmt,
-                                    java.util.List<NameTag> pairs,
-                                    java.util.NavigableMap<Long, double[]> timeToRow) throws java.io.IOException {
+    // 单列：预建每秒时间戳 -> NaN
+    private static void ensurePerSecondRowsSingleCol(Date start, Date end,
+                                                    NavigableMap<Long, Double> perCol) {
+        long s = toSecMs(start.getTime());
+        long e = toSecMs(end.getTime());
+        for (long t = s; t <= e; t += 1000L) {
+            perCol.put(t, Double.NaN);
+        }
+    }
 
-        try (java.io.BufferedWriter w = java.nio.file.Files.newBufferedWriter(
-                path, java.nio.charset.Charset.forName("GBK"))) {
-
-            // header
-            StringBuilder header = new StringBuilder("time");
-            for (NameTag nt : pairs) {
-                header.append(',').append(nt.name);
-            }
-            w.write(header.toString());
-            w.newLine();
-
-            // rows（按时间升序）
-            for (java.util.Map.Entry<Long, double[]> e : timeToRow.entrySet()) {
-                long tsMs = e.getKey();
-                double[] row = e.getValue();
-
-                StringBuilder line = new StringBuilder();
-                line.append(fmt.format(new java.util.Date(tsMs)));
-                for (double v : row) {
-                    if (Double.isNaN(v)) {
-                        line.append(','); // 空值
-                    } else {
-                        line.append(',').append(v);
-                    }
+    // 写单列 CSV（GBK），两列：time,<colName>
+    private static void writeSingleColCsvGbk(Path outPath, SimpleDateFormat fmt, String colName,
+                                            NavigableMap<Long, Double> perCol) throws IOException {
+        ensureDir(outPath.getParent());
+        try (BufferedWriter bw = Files.newBufferedWriter(outPath, java.nio.charset.Charset.forName("GBK"))) {
+            bw.write("time," + colName);
+            bw.newLine();
+            for (Map.Entry<Long, Double> en : perCol.entrySet()) {
+                String timeStr = fmt.format(new Date(en.getKey()));
+                Double v = en.getValue();
+                // 保留 NaN 字面量（或你也可以写空字符串）
+                bw.write(timeStr);
+                bw.write(',');
+                if (v == null || v.isNaN()) {
+                    bw.write("NaN");
+                } else {
+                    bw.write(Double.toString(v));
                 }
-                w.write(line.toString());
-                w.newLine();
+                bw.newLine();
             }
         }
     }
+
+    // 路径取文件名（保持你原来的命名）
+    private static String extractFileName(Path p) {
+        return p.getFileName().toString();
+    }
+
+    // 目录存在性保证
+    private static void ensureDir(Path dir) throws IOException {
+        if (dir != null && !Files.exists(dir)) {
+            Files.createDirectories(dir);
+        }
+    }
+
+    // 列名转安全目录名（去除不合法字符）
+    private static String sanitizeAsFolder(String name) {
+        // Windows 不支持 <>:"/\\|?* 等；同时去掉尾部空格和点
+        String s = name.replaceAll("[<>:\"/\\\\|?*]+", "_").trim();
+        while (s.endsWith(".") || s.endsWith(" ")) {
+            s = s.substring(0, s.length() - 1);
+        }
+        if (s.isEmpty()) s = "_";
+        return s;
+    }
+
 }
