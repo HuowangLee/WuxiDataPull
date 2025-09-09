@@ -44,7 +44,7 @@ public class Main {
             safeTagsFile = tagsFile.substring(0, dotIndex);
         }
         
-        String folderName = "variables_out_1";
+        String folderName = "variables_out";
         java.io.File folder = new java.io.File(folderName);
         if (!folder.exists()) {
             folder.mkdirs();
@@ -74,7 +74,7 @@ public class Main {
         //     return;
         // }
 
-        int STEP_MINUTES = 60;
+        int STEP_MINUTES = 10;
         List<Date[]> windows = splitByMinutes(start, end, STEP_MINUTES);
 
 
