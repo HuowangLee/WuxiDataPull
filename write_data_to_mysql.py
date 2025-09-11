@@ -236,7 +236,7 @@ def main():
 
     try:
         for fpath in files:
-            if '8#炉燃烧炉排_PV_20250701T123000-20250701T124000.csv' in fpath and not flag:
+            if '一次风至第' in fpath and not flag:
                 flag = True
 
             if not flag:

@@ -71,6 +71,7 @@ def add_column(conn, col_name, comment):
     cur = conn.cursor()
     cur.execute(sql)
     conn.commit()
+
     cur.close()
 
 def strip_prefix(name, prefix="ljDCS."):
